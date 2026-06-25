@@ -55,7 +55,7 @@ From the Pi 4:
 
 ```bash
 cd pi-cluster-playbook
-ansible-galaxy collection install -r requirements.yml
+ansible-galaxy collection install -r requirements.yml --force
 ansible-inventory -i inventory.ini --list
 ansible-playbook -i inventory.ini site.yml --syntax-check
 ansible all -i inventory.ini -m ping
