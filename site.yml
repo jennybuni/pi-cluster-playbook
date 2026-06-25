@@ -132,6 +132,14 @@
         group: "{{ cluster_user }}"
         mode: "0775"
 
+    - name: Ensure NFS exports directory exists
+      ansible.builtin.file:
+        path: /etc/exports.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
     - name: Configure NFS export for cluster nodes
       ansible.builtin.copy:
         dest: /etc/exports.d/cluster.exports
