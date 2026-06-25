@@ -1,0 +1,348 @@
+---
+- name: Prepare controller SSH key for MPI and cluster administration
+  hosts: controller
+  gather_facts: true
+  become: false
+
+  tasks:
+    - name: Ensure SSH directory exists on controller
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.ssh"
+        state: directory
+        mode: "0700"
+
+    - name: Check whether controller SSH key already exists
+      ansible.builtin.stat:
+        path: "{{ ansible_env.HOME }}/.ssh/id_ed25519.pub"
+      register: controller_ssh_key
+
+    - name: Generate controller SSH key if missing
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -N "" -f "{{ ansible_env.HOME }}/.ssh/id_ed25519"
+      when: not controller_ssh_key.stat.exists
+
+    - name: Read controller public key
+      ansible.builtin.slurp:
+        src: "{{ ansible_env.HOME }}/.ssh/id_ed25519.pub"
+      register: controller_public_key
+
+    - name: Store controller public key as fact
+      ansible.builtin.set_fact:
+        controller_pubkey: "{{ controller_public_key.content | b64decode }}"
+
+
+- name: Common setup on all Pis
+  hosts: cluster_all
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install common packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - htop
+          - curl
+          - wget
+          - vim
+          - rsync
+          - nfs-common
+          - openssh-server
+          - openssh-client
+          - openmpi-bin
+          - libopenmpi-dev
+          - python3-mpi4py
+          - prometheus-node-exporter
+          - mosquitto-clients
+        state: present
+
+    - name: Ensure SSH service is enabled
+      ansible.builtin.service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Allow controller SSH key for cluster user
+      ansible.builtin.authorized_key:
+        user: "{{ cluster_user }}"
+        key: "{{ hostvars[groups['controller'][0]].controller_pubkey }}"
+        state: present
+
+    - name: Ensure node exporter is running
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+    - name: Create local MPI config directory
+      ansible.builtin.file:
+        path: /etc/openmpi
+        state: directory
+        mode: "0755"
+
+
+- name: Configure Pi 4 controller services
+  hosts: controller
+  gather_facts: true
+  become: true
+
+  handlers:
+    - name: reload nfs exports
+      ansible.builtin.command:
+        cmd: exportfs -ra
+
+    - name: restart prometheus
+      ansible.builtin.service:
+        name: prometheus
+        state: restarted
+
+    - name: restart grafana
+      ansible.builtin.service:
+        name: grafana-server
+        state: restarted
+
+    - name: restart mosquitto
+      ansible.builtin.service:
+        name: mosquitto
+        state: restarted
+
+  tasks:
+    - name: Install controller packages
+      ansible.builtin.apt:
+        name:
+          - nfs-kernel-server
+          - prometheus
+          - mosquitto
+          - gpg
+          - apt-transport-https
+          - software-properties-common
+        state: present
+        update_cache: true
+
+    - name: Create NFS shared directory
+      ansible.builtin.file:
+        path: "{{ nfs_share_path }}"
+        state: directory
+        owner: "{{ cluster_user }}"
+        group: "{{ cluster_user }}"
+        mode: "0775"
+
+    - name: Configure NFS export for cluster nodes
+      ansible.builtin.copy:
+        dest: /etc/exports.d/cluster.exports
+        mode: "0644"
+        content: |
+          {{ nfs_share_path }}{% for host in groups['cluster_nodes'] %} {{ hostvars[host].ansible_host | default(host) }}({{ nfs_export_options }}){% endfor %}
+
+      notify: reload nfs exports
+
+    - name: Ensure NFS server is enabled
+      ansible.builtin.service:
+        name: "{{ nfs_server_service }}"
+        state: started
+        enabled: true
+
+    - name: Create MPI hostfile on controller
+      ansible.builtin.copy:
+        dest: /etc/openmpi/cluster-hostfile
+        mode: "0644"
+        content: |
+          {% for host in groups['cluster_all'] %}
+          {{ hostvars[host].mpi_host | default(hostvars[host].ansible_host | default(host)) }} slots={{ hostvars[host].mpi_slots | default(1) }}
+          {% endfor %}
+
+    - name: Configure Prometheus scrape targets
+      ansible.builtin.copy:
+        dest: /etc/prometheus/prometheus.yml
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: {{ prometheus_scrape_interval }}
+
+          scrape_configs:
+            - job_name: "cluster-node-exporter"
+              static_configs:
+                - targets:
+          {% for host in groups['cluster_all'] %}
+                    - "{{ hostvars[host].node_exporter_target | default(hostvars[host].ansible_host | default(host)) }}:9100"
+          {% endfor %}
+
+      notify: restart prometheus
+
+    - name: Ensure Prometheus is enabled
+      ansible.builtin.service:
+        name: prometheus
+        state: started
+        enabled: true
+
+    - name: Ensure Grafana keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Grafana APT signing key
+      ansible.builtin.get_url:
+        url: https://apt.grafana.com/gpg.key
+        dest: /tmp/grafana.gpg.key
+        mode: "0644"
+
+    - name: Install Grafana APT signing key
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/grafana.gpg /tmp/grafana.gpg.key
+      args:
+        creates: /etc/apt/keyrings/grafana.gpg
+
+    - name: Add Grafana APT repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/grafana.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main
+
+    - name: Install Grafana
+      ansible.builtin.apt:
+        name: grafana
+        state: present
+        update_cache: true
+
+    - name: Provision Prometheus datasource in Grafana
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/datasources/prometheus.yml
+        mode: "0644"
+        content: |
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://localhost:9090
+              isDefault: true
+              editable: true
+      notify: restart grafana
+
+    - name: Ensure Grafana is enabled
+      ansible.builtin.service:
+        name: grafana-server
+        state: started
+        enabled: true
+
+    - name: Configure Mosquitto for cluster MQTT
+      ansible.builtin.copy:
+        dest: /etc/mosquitto/conf.d/cluster.conf
+        mode: "0644"
+        content: |
+          listener {{ mqtt_port }} {{ mqtt_bind_address }}
+          allow_anonymous true
+
+          persistence true
+          persistence_location /var/lib/mosquitto/
+
+          log_dest syslog
+      notify: restart mosquitto
+
+    - name: Ensure Mosquitto is enabled
+      ansible.builtin.service:
+        name: mosquitto
+        state: started
+        enabled: true
+
+
+- name: Configure worker node NFS mounts
+  hosts: cluster_nodes
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Create NFS mount directory
+      ansible.builtin.file:
+        path: "{{ nfs_mount_path }}"
+        state: directory
+        mode: "0775"
+
+    - name: Mount shared cluster directory
+      ansible.posix.mount:
+        path: "{{ nfs_mount_path }}"
+        src: "{{ controller_cluster_addr }}:{{ nfs_share_path }}"
+        fstype: nfs
+        opts: "rw,nofail,_netdev,x-systemd.automount"
+        state: mounted
+
+
+- name: Configure MQTT status publisher on all Pis
+  hosts: cluster_all
+  gather_facts: true
+  become: true
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+  tasks:
+    - name: Install MQTT status publisher script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/cluster-publish-status
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          BROKER="{{ controller_cluster_addr }}"
+          PORT="{{ mqtt_port }}"
+          HOST="$(hostname)"
+
+          TEMP_RAW="$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)"
+          TEMP_C="$(awk "BEGIN { printf \"%.1f\", $TEMP_RAW / 1000 }")"
+          LOAD1="$(cut -d ' ' -f1 /proc/loadavg)"
+          UPTIME_RAW="$(cut -d ' ' -f1 /proc/uptime)"
+          UPTIME_SECONDS="${UPTIME_RAW%.*}"
+
+          mosquitto_pub \
+            -h "$BROKER" \
+            -p "$PORT" \
+            -t "cluster/$HOST/status" \
+            -m "{\"host\":\"$HOST\",\"temp_c\":$TEMP_C,\"load1\":$LOAD1,\"uptime_seconds\":$UPTIME_SECONDS}"
+
+    - name: Create MQTT status systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cluster-status.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Publish Raspberry Pi cluster status over MQTT
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/cluster-publish-status
+      notify: reload systemd
+
+    - name: Create MQTT status systemd timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cluster-status.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run Raspberry Pi cluster MQTT status publisher
+
+          [Timer]
+          OnBootSec=60s
+          OnUnitActiveSec={{ mqtt_status_interval }}
+          Unit=cluster-status.service
+
+          [Install]
+          WantedBy=timers.target
+      notify: reload systemd
+
+    - name: Enable MQTT status timer
+      ansible.builtin.systemd:
+        name: cluster-status.timer
+        state: started
+        enabled: true
+        daemon_reload: true

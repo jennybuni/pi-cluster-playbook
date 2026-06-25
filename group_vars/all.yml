@@ -1,0 +1,18 @@
+---
+cluster_user: jenny
+ansible_user: "{{ cluster_user }}"
+
+# Hostname or IP of the Pi 4 as seen by p1/p2/p3/p4.
+# Change this if your nodes cannot resolve "pi4".
+controller_cluster_addr: "pi4"
+
+nfs_share_path: "/srv/cluster"
+nfs_mount_path: "/mnt/cluster"
+nfs_export_options: "rw,sync,no_subtree_check,no_root_squash"
+nfs_server_service: "nfs-kernel-server"
+
+mqtt_bind_address: "0.0.0.0"
+mqtt_port: 1883
+mqtt_status_interval: "60s"
+
+prometheus_scrape_interval: "15s"
