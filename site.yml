@@ -106,11 +106,6 @@
         name: grafana-server
         state: restarted
 
-    - name: test mosquitto config
-      ansible.builtin.command:
-        cmd: mosquitto -c /etc/mosquitto/mosquitto.conf -t
-      changed_when: false
-
     - name: restart mosquitto
       ansible.builtin.service:
         name: mosquitto
@@ -253,9 +248,7 @@
         content: |
           listener {{ mqtt_port }} {{ mqtt_bind_address }}
           allow_anonymous true
-      notify:
-        - test mosquitto config
-        - restart mosquitto
+      notify: restart mosquitto
 
     - name: Ensure Mosquitto is enabled
       ansible.builtin.service:
