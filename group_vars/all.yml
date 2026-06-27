@@ -4,7 +4,7 @@ ansible_user: "{{ cluster_user }}"
 
 # Hostname or IP of the Pi 4 as seen by p1/p2/p3/p4.
 # Change this if your nodes cannot resolve "pi4".
-controller_cluster_addr: "pi4"
+controller_cluster_addr: "cluster"
 
 nfs_share_path: "/srv/cluster"
 nfs_mount_path: "/mnt/cluster"
