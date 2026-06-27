@@ -7,6 +7,7 @@ controller_cluster_addr: "172.19.181.254"
 
 nfs_share_path: "/srv/cluster"
 nfs_mount_path: "/mnt/cluster"
+nfs_client_network: "172.19.181.0/24"
 nfs_export_options: "rw,sync,no_subtree_check,no_root_squash"
 nfs_server_service: "nfs-kernel-server"
 
