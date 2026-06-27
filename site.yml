@@ -92,10 +92,6 @@
   become: true
 
   handlers:
-    - name: reload nfs exports
-      ansible.builtin.command:
-        cmd: exportfs -ra
-
     - name: restart prometheus
       ansible.builtin.service:
         name: prometheus
@@ -147,13 +143,31 @@
         content: |
           {{ nfs_share_path }} {{ nfs_client_network }}({{ nfs_export_options }})
 
-      notify: reload nfs exports
-
     - name: Ensure NFS server is enabled
       ansible.builtin.service:
         name: "{{ nfs_server_service }}"
         state: started
         enabled: true
+
+    - name: Reload NFS exports
+      ansible.builtin.command:
+        cmd: exportfs -ra
+      changed_when: false
+
+    - name: Read active NFS exports
+      ansible.builtin.command:
+        cmd: exportfs -s
+      register: active_nfs_exports
+      changed_when: false
+
+    - name: Verify cluster NFS export is active
+      ansible.builtin.assert:
+        that:
+          - nfs_share_path in active_nfs_exports.stdout
+          - nfs_client_network in active_nfs_exports.stdout
+        fail_msg: >-
+          Expected {{ nfs_share_path }} exported to {{ nfs_client_network }},
+          but active exports are: {{ active_nfs_exports.stdout }}
 
     - name: Create MPI hostfile on controller
       ansible.builtin.copy:
